@@ -1,0 +1,300 @@
+;=========================================================
+; PIC16F887 - Teclado 4x3 + 4 displays multiplexados
+; Secuencia:
+; 0000 -> tecla 1 -> 0001
+;      -> tecla 2 -> 0012
+;      -> tecla 7 -> 0127
+;      -> tecla 9 -> 1279
+;=========================================================
+
+        LIST P=16F887
+        #include "p16f887.inc"
+
+        __CONFIG _CONFIG1, _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOREN_OFF & _IESO_OFF & _FCMEN_OFF & _LVP_OFF
+        __CONFIG _CONFIG2, _BOR40V & _WRT_OFF
+
+;---------------- VARIABLES ----------------
+        CBLOCK 0x20
+        DIG1
+        DIG2
+        DIG3
+        DIG4
+        TECLA
+        DISP
+        W_TEMP
+        STATUS_TEMP
+        PCLATH_TEMP
+        D1
+        D2
+        ENDC
+
+;---------------- RESET ----------------
+        ORG 0x0000
+        GOTO INICIO
+
+;---------------- INTERRUPCION ----------------
+        ORG 0x0004
+
+ISR:
+        MOVWF   W_TEMP
+        SWAPF   STATUS,W
+        MOVWF   STATUS_TEMP
+        MOVF    PCLATH,W
+        MOVWF   PCLATH_TEMP
+
+        BTFSS   INTCON,T0IF
+        GOTO    FIN_ISR
+
+        BCF     INTCON,T0IF
+        MOVLW   .100
+        MOVWF   TMR0
+
+        CALL    MULTIPLEXAR
+
+FIN_ISR:
+        MOVF    PCLATH_TEMP,W
+        MOVWF   PCLATH
+        SWAPF   STATUS_TEMP,W
+        MOVWF   STATUS
+        SWAPF   W_TEMP,F
+        SWAPF   W_TEMP,W
+        RETFIE
+
+;---------------- INICIO ----------------
+INICIO:
+        ; Oscilador externo XT
+
+        ; Banco 1
+        BSF     STATUS,RP0
+        BCF     STATUS,RP1
+
+        CLRF    TRISD           ; PORTD salida segmentos
+        MOVLW   b'11111000'     ; RB0-RB2 columnas salida, RB4-RB7 filas entrada
+        MOVWF   TRISB
+        MOVLW   b'11110000'     ; RC0-RC3 salidas
+        MOVWF   TRISC
+
+        ; Timer0 interno, prescaler 1:32, pull-ups PORTB activos
+        MOVLW   b'00000100'
+        MOVWF   OPTION_REG
+
+        ; Banco 3
+        BSF     STATUS,RP0
+        BSF     STATUS,RP1
+        CLRF    ANSEL
+        CLRF    ANSELH
+
+        ; Banco 1
+        BSF     STATUS,RP0
+        BCF     STATUS,RP1
+        MOVLW   b'11110000'
+        MOVWF   WPUB            ; pull-ups en filas RB4-RB7
+
+        ; Banco 0
+        BCF     STATUS,RP0
+        BCF     STATUS,RP1
+
+        CLRF    PORTD
+        CLRF    PORTC
+        MOVLW   b'00000111'
+        MOVWF   PORTB
+
+        CLRF    DIG1
+        CLRF    DIG2
+        CLRF    DIG3
+        CLRF    DIG4
+        CLRF    DISP
+
+        MOVLW   .100
+        MOVWF   TMR0
+
+        BCF     INTCON,T0IF
+        BSF     INTCON,T0IE
+        BSF     INTCON,GIE
+
+;---------------- LOOP PRINCIPAL ----------------
+LOOP:
+        CALL    LEER_TECLADO
+        MOVWF   TECLA
+
+        MOVLW   .255
+        XORWF   TECLA,W
+        BTFSC   STATUS,Z
+        GOTO    LOOP
+
+        CALL    CORRER_DIGITOS
+        CALL    ANTIRREBOTE
+        CALL    ESPERAR_SUELTE
+
+        GOTO    LOOP
+
+;---------------- CORRIMIENTO ----------------
+CORRER_DIGITOS:
+        MOVF    DIG2,W
+        MOVWF   DIG1
+
+        MOVF    DIG3,W
+        MOVWF   DIG2
+
+        MOVF    DIG4,W
+        MOVWF   DIG3
+
+        MOVF    TECLA,W
+        MOVWF   DIG4
+
+        RETURN
+
+;---------------- MULTIPLEXADO ----------------
+MULTIPLEXAR:
+        CLRF    PORTC           ; apaga displays
+
+        MOVF    DISP,W
+        XORLW   .0
+        BTFSC   STATUS,Z
+        GOTO    MOSTRAR_D1
+
+        MOVF    DISP,W
+        XORLW   .1
+        BTFSC   STATUS,Z
+        GOTO    MOSTRAR_D2
+
+        MOVF    DISP,W
+        XORLW   .2
+        BTFSC   STATUS,Z
+        GOTO    MOSTRAR_D3
+
+        GOTO    MOSTRAR_D4
+
+MOSTRAR_D1:
+        MOVF    DIG1,W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        BSF     PORTC,0
+        GOTO    SIG_DISP
+
+MOSTRAR_D2:
+        MOVF    DIG2,W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        BSF     PORTC,1
+        GOTO    SIG_DISP
+
+MOSTRAR_D3:
+        MOVF    DIG3,W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        BSF     PORTC,2
+        GOTO    SIG_DISP
+
+MOSTRAR_D4:
+        MOVF    DIG4,W
+        CALL    TABLA_7SEG
+        MOVWF   PORTD
+        BSF     PORTC,3
+
+SIG_DISP:
+        INCF    DISP,F
+        MOVLW   .4
+        SUBWF   DISP,W
+        BTFSS   STATUS,C
+        RETURN
+        CLRF    DISP
+        RETURN
+
+;---------------- TECLADO ----------------
+; Devuelve W = 0 a 9 si hay tecla
+; Devuelve W = 255 si no hay tecla
+
+LEER_TECLADO:
+        ; Columna 1: RB0 = 0
+        MOVLW   b'00000110'
+        MOVWF   PORTB
+        CALL    PAUSA_CORTA
+
+        BTFSS   PORTB,4
+        RETLW   .1
+        BTFSS   PORTB,5
+        RETLW   .4
+        BTFSS   PORTB,6
+        RETLW   .7
+        BTFSS   PORTB,7
+        RETLW   .255       ; tecla * ignorada
+
+        ; Columna 2: RB1 = 0
+        MOVLW   b'00000101'
+        MOVWF   PORTB
+        CALL    PAUSA_CORTA
+
+        BTFSS   PORTB,4
+        RETLW   .2
+        BTFSS   PORTB,5
+        RETLW   .5
+        BTFSS   PORTB,6
+        RETLW   .8
+        BTFSS   PORTB,7
+        RETLW   .0
+
+        ; Columna 3: RB2 = 0
+        MOVLW   b'00000011'
+        MOVWF   PORTB
+        CALL    PAUSA_CORTA
+
+        BTFSS   PORTB,4
+        RETLW   .3
+        BTFSS   PORTB,5
+        RETLW   .6
+        BTFSS   PORTB,6
+        RETLW   .9
+        BTFSS   PORTB,7
+        RETLW   .255       ; tecla # ignorada
+
+        RETLW   .255
+
+;---------------- ESPERAR QUE SUELTE ----------------
+ESPERAR_SUELTE:
+        CALL    LEER_TECLADO
+        XORLW   .255
+        BTFSS   STATUS,Z
+        GOTO    ESPERAR_SUELTE
+        RETURN
+
+;---------------- TABLA 7 SEG ----------------
+; Común cátodo: segmentos activos en 1
+; PORTD: a b c d e f g dp
+
+TABLA_7SEG:
+        ADDWF   PCL,F
+        RETLW   b'00111111'     ; 0
+        RETLW   b'00000110'     ; 1
+        RETLW   b'01011011'     ; 2
+        RETLW   b'01001111'     ; 3
+        RETLW   b'01100110'     ; 4
+        RETLW   b'01101101'     ; 5
+        RETLW   b'01111101'     ; 6
+        RETLW   b'00000111'     ; 7
+        RETLW   b'01111111'     ; 8
+        RETLW   b'01101111'     ; 9
+
+;---------------- DELAYS ----------------
+PAUSA_CORTA:
+        MOVLW   .20
+        MOVWF   D1
+PC1:
+        DECFSZ  D1,F
+        GOTO    PC1
+        RETURN
+
+ANTIRREBOTE:
+        MOVLW   .80
+        MOVWF   D1
+AR1:
+        MOVLW   .250
+        MOVWF   D2
+AR2:
+        DECFSZ  D2,F
+        GOTO    AR2
+        DECFSZ  D1,F
+        GOTO    AR1
+        RETURN
+
+        END
